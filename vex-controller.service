@@ -1,0 +1,13 @@
+[Unit]
+Description=VEX Controller Driver
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vex-controller --daemon
+Restart=no
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2888", ATTRS{idProduct}=="0210", TAG+="systemd", ENV{SYSTEMD_WANTS}="vex-controller.service"
+
