@@ -6,6 +6,7 @@ mod linux {
     use evdev::{
         uinput::{VirtualDevice, VirtualDeviceBuilder},
         AttributeSet, InputEvent, EventType, Key, AbsoluteAxisType, UinputAbsSetup, AbsInfo,
+        InputId, BusType,
     };
 
     pub struct GamepadHandler {
@@ -16,9 +17,9 @@ mod linux {
         pub fn new() -> anyhow::Result<Self> {
             let mut keys = AttributeSet::<Key>::new();
             keys.insert(Key::BTN_TL);
-            keys.insert(Key::BTN_TL2);
+            // keys.insert(Key::BTN_TL2); // Mapped to ABS_Z
             keys.insert(Key::BTN_TR);
-            keys.insert(Key::BTN_TR2);
+            // keys.insert(Key::BTN_TR2); // Mapped to ABS_RZ
             keys.insert(Key::BTN_THUMBL);
             keys.insert(Key::BTN_THUMBR);
             
@@ -27,8 +28,18 @@ mod linux {
             keys.insert(Key::BTN_NORTH);
             keys.insert(Key::BTN_WEST);
 
+            // Add extra buttons to reach 16 total (prevent crashes in some games)
+            keys.insert(Key::BTN_SELECT);
+            keys.insert(Key::BTN_START);
+            keys.insert(Key::BTN_MODE);
+            keys.insert(Key::BTN_DPAD_UP);
+            keys.insert(Key::BTN_DPAD_DOWN);
+            keys.insert(Key::BTN_DPAD_LEFT);
+            keys.insert(Key::BTN_DPAD_RIGHT);
+
             let device = VirtualDeviceBuilder::new()?
                 .name("VEX IQ Gen 2 Controller")
+                .input_id(InputId::new(BusType::BUS_USB, 0x045e, 0x028e, 0x110))
                 .with_keys(&keys)?
                 .with_absolute_axis(&UinputAbsSetup::new(
                     AbsoluteAxisType::ABS_X,
@@ -46,6 +57,14 @@ mod linux {
                     AbsoluteAxisType::ABS_RY,
                     AbsInfo::new(127, 0, 255, 0, 0, 0),
                 ))?
+                .with_absolute_axis(&UinputAbsSetup::new(
+                    AbsoluteAxisType::ABS_Z,
+                    AbsInfo::new(0, 0, 255, 0, 0, 0),
+                ))?
+                .with_absolute_axis(&UinputAbsSetup::new(
+                    AbsoluteAxisType::ABS_RZ,
+                    AbsInfo::new(0, 0, 255, 0, 0, 0),
+                ))?
                 .build()?;
 
             Ok(Self { device })
@@ -61,18 +80,25 @@ mod linux {
             // VEX: Up is 255 (usually), Down is 0.
             // Standard gamepad: Up is min, Down is max.
             // So we need to invert Y axes: 255 - value.
-            // Also, user reported Left and Right joysticks are switched.
+            
+            // Reverted to previous configuration as requested:
+            // ABS_X/Y <- Right Stick
+            // ABS_RX/RY <- Left Stick
             
             events.push(InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_X.0, state.right_x as i32));
             events.push(InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_Y.0, 255 - state.right_y as i32));
             events.push(InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_RX.0, state.left_x as i32));
             events.push(InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_RY.0, 255 - state.left_y as i32));
 
+            // Triggers (L2/R2) mapped to Axes
+            events.push(InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_Z.0, if state.l_down { 255 } else { 0 }));
+            events.push(InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_RZ.0, if state.r_down { 255 } else { 0 }));
+
             // Buttons
             events.push(InputEvent::new(EventType::KEY, Key::BTN_TL.0, if state.l_up { 1 } else { 0 }));
-            events.push(InputEvent::new(EventType::KEY, Key::BTN_TL2.0, if state.l_down { 1 } else { 0 }));
+            // events.push(InputEvent::new(EventType::KEY, Key::BTN_TL2.0, if state.l_down { 1 } else { 0 }));
             events.push(InputEvent::new(EventType::KEY, Key::BTN_TR.0, if state.r_up { 1 } else { 0 }));
-            events.push(InputEvent::new(EventType::KEY, Key::BTN_TR2.0, if state.r_down { 1 } else { 0 }));
+            // events.push(InputEvent::new(EventType::KEY, Key::BTN_TR2.0, if state.r_down { 1 } else { 0 }));
             
             events.push(InputEvent::new(EventType::KEY, Key::BTN_THUMBL.0, if state.l3 { 1 } else { 0 }));
             events.push(InputEvent::new(EventType::KEY, Key::BTN_THUMBR.0, if state.r3 { 1 } else { 0 }));

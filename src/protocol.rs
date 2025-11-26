@@ -1,5 +1,9 @@
-use crc::{Crc, CRC_16_XMODEM, CRC_32_ISO_HDLC};
+use crate::transport::Transport;
+use anyhow::{Result, bail};
 use byteorder::{BigEndian, ByteOrder};
+use crc::{Crc, CRC_16_XMODEM, CRC_32_ISO_HDLC};
+use std::time::{Duration, Instant};
+use tracing::debug;
 
 pub const HEADERS: [u8; 4] = [0xC9, 0x36, 0xB8, 0x47];
 pub const HEADERR: [u8; 2] = [0xAA, 0x55];
@@ -14,24 +18,25 @@ pub enum Command {
     SysStatus = 0x20,
     FileInit = 0x11,
     FactoryPing = 0xF4,
-    // Add more as needed
+    ControllerCdc = 0x58,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
-pub enum ResponseStatus {
-    AckRx = 0x76,
-    NackRx = 0xFF,
-    // Add more as needed
+pub enum ControllerSubCommand {
+    GetState = 0x60,
+    SetPairId = 0x61,
+    GetPairId = 0x62,
+    GetTestData = 0x63,
+    TestCmd = 0x64,
+    AbortJsCal = 0x65,
+    StartJsCal = 0x66,
+    GetVersions = 0x67,
+    DevState = 0x68,
 }
 
 pub fn calculate_crc16(data: &[u8]) -> u16 {
     CRC16_XMODEM.checksum(data)
-}
-
-#[allow(dead_code)]
-pub fn calculate_crc32(data: &[u8]) -> u32 {
-    CRC32.checksum(data)
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -51,16 +56,15 @@ pub struct ControllerState {
     pub l3: bool,
     pub r3: bool,
     pub battery: u8,
+    pub cal_active: bool,
+    pub cal_left: bool,
+    pub cal_right: bool,
 }
 
-pub struct Protocol;
+struct Protocol;
 
 impl Protocol {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn encode_command(&self, cmd1: u8, cmd2: u8, data: &[u8]) -> Vec<u8> {
+    fn encode_command(cmd1: u8, cmd2: u8, data: &[u8]) -> Vec<u8> {
         let mut packet = Vec::new();
         packet.extend_from_slice(&HEADERS);
         packet.push(cmd1);
@@ -83,7 +87,7 @@ impl Protocol {
         packet
     }
 
-    pub fn decode_response(&self, buffer: &[u8]) -> Option<Vec<u8>> {
+    fn decode_response(buffer: &[u8]) -> Option<Vec<u8>> {
         // Basic validation
         if buffer.len() < 5 {
             return None;
@@ -125,29 +129,20 @@ impl Protocol {
         Some(packet[header_size..packet_len - 2].to_vec())
     }
 
-    pub fn parse_controller_state(payload: &[u8]) -> Option<ControllerState> {
-        // Payload should start with Cmd (0x60)
-        // Payload: Cmd(1) + Joy(4) + ... + Buttons(2) + ...
+    fn parse_controller_state(payload: &[u8]) -> Option<ControllerState> {
         if payload.len() < 14 || payload[0] != 0x60 {
             return None;
         }
 
-        // JS: e[0]=r[5], e[1]=r[6], e[2]=r[7], e[3]=r[8]
-        // payload[0] is Cmd (r[4])
-        // payload[1] is r[5] (Left X?)
-        // payload[2] is r[6] (Left Y?)
-        // payload[3] is r[7] (Right X?)
-        // payload[4] is r[8] (Right Y?)
-        
         let left_x = payload[1];
         let left_y = payload[2];
         let right_x = payload[3];
         let right_y = payload[4];
         
-        // Buttons at payload[8..10] (r[12..14])
-        // JS: var o = n.getUint16(12); (Big Endian)
         let buttons = BigEndian::read_u16(&payload[8..10]);
         let extra_buttons = payload[10];
+        
+        let status = payload[8];
         
         Some(ControllerState {
             left_x,
@@ -165,6 +160,110 @@ impl Protocol {
             l3: (extra_buttons & 0x01) != 0,
             r3: (extra_buttons & 0x02) != 0,
             battery: payload[11], 
+            cal_active: (status >> 4) & 1 != 0,
+            cal_left: (status >> 5) & 1 != 0,
+            cal_right: (status >> 6) & 1 != 0,
         })
+    }
+}
+
+pub struct VexController {
+    transport: Box<dyn Transport>,
+}
+
+impl VexController {
+    pub fn new(transport: Box<dyn Transport>) -> Self {
+        Self { transport }
+    }
+
+    pub fn send_command(&mut self, cmd1: u8, cmd2: u8, data: &[u8]) -> Result<Vec<u8>> {
+        let command = Protocol::encode_command(cmd1, cmd2, data);
+        
+        self.transport.clear_buffer()?;
+        self.transport.send_bytes(&command)?;
+
+        let mut buffer = vec![0u8; 1024];
+        let mut packet_buffer = Vec::new();
+        let start = Instant::now();
+
+        while start.elapsed() < Duration::from_secs(2) {
+            let n = self.transport.receive_bytes(&mut buffer)?;
+            if n > 0 {
+                packet_buffer.extend_from_slice(&buffer[..n]);
+                
+                // Framing loop
+                while packet_buffer.len() >= 2 {
+                    if let Some(start_idx) = packet_buffer.windows(2).position(|w| w == HEADERR) {
+                        if start_idx > 0 {
+                            packet_buffer.drain(0..start_idx);
+                        }
+                        
+                        if packet_buffer.len() < 5 {
+                            break;
+                        }
+
+                        let (len, header_size) = if (packet_buffer[3] & 0x80) != 0 {
+                            let len = ((packet_buffer[3] & 0x7F) as usize) << 8 | (packet_buffer[4] as usize);
+                            (len, 5)
+                        } else {
+                            (packet_buffer[3] as usize, 4)
+                        };
+                        
+                        let packet_len = header_size + len;
+                        if packet_buffer.len() >= packet_len {
+                            let packet = &packet_buffer[..packet_len];
+                            if let Some(payload) = Protocol::decode_response(packet) {
+                                debug!("Raw response: {:02X?}", payload);
+                                return Ok(payload);
+                            } else {
+                                // CRC failed or invalid, remove header and try again
+                                packet_buffer.drain(0..2);
+                            }
+                        } else {
+                            break;
+                        }
+                    } else {
+                        packet_buffer.clear();
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        
+        bail!("Timeout waiting for response");
+    }
+
+    pub fn get_state(&mut self) -> Result<ControllerState> {
+        let payload = self.send_command(Command::ControllerCdc as u8, ControllerSubCommand::GetState as u8, &[])?;
+        Protocol::parse_controller_state(&payload).ok_or_else(|| anyhow::anyhow!("Failed to parse state"))
+    }
+
+    pub fn get_versions(&mut self) -> Result<String> {
+        let payload = self.send_command(Command::ControllerCdc as u8, ControllerSubCommand::GetVersions as u8, &[])?;
+        if payload.len() > 1 {
+            Ok(String::from_utf8_lossy(&payload[1..]).to_string())
+        } else {
+            bail!("Invalid version payload")
+        }
+    }
+
+    pub fn get_pair_id(&mut self) -> Result<u8> {
+        let payload = self.send_command(Command::ControllerCdc as u8, ControllerSubCommand::GetPairId as u8, &[])?;
+        if payload.len() > 1 {
+            Ok(payload[1])
+        } else {
+            bail!("Invalid pair ID payload")
+        }
+    }
+
+    pub fn start_calibration(&mut self) -> Result<()> {
+        self.send_command(Command::ControllerCdc as u8, ControllerSubCommand::StartJsCal as u8, &[])?;
+        Ok(())
+    }
+
+    pub fn abort_calibration(&mut self) -> Result<()> {
+        self.send_command(Command::ControllerCdc as u8, ControllerSubCommand::AbortJsCal as u8, &[])?;
+        Ok(())
     }
 }

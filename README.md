@@ -1,48 +1,79 @@
-# VEX Controller BLE Protocol
+# VEX IQ Gen 2 Controller Driver
 
-This project implements the VEX Robotics Bluetooth Low Energy (BLE) protocol for communicating with VEX IQ (and likely V5/EXP) Brains.
+This project allows you to use a VEX IQ Generation 2 Controller as a standard gamepad on your computer. It communicates with the controller via USB Serial and creates a virtual Xbox 360 controller that works with most games and emulators.
 
-## Protocol Details
+## Features
 
-### BLE Service & Characteristics
+- **USB Connection**: Connects directly via USB-C.
+- **Standard Gamepad Emulation**: Emulates a Microsoft Xbox 360 controller for maximum compatibility.
+- **Full Mapping**: Supports all buttons and joysticks, including L2/R2 triggers.
+- **Low Latency**: Written in Rust for high performance.
 
-**Service UUID**: `08590f7e-db05-467e-8757-72f6faeb13d5`
+## Installation
 
-| Characteristic | UUID | Type | Description |
-|---|---|---|---|
-| **RX Admin** | `08590f7e-db05-467e-8757-72f6faeb13f5` | Write | Send System Commands to Brain |
-| **TX Admin** | `08590f7e-db05-467e-8757-72f6faeb1306` | Notify | Receive System Responses from Brain |
-| **RX User** | `08590f7e-db05-467e-8757-72f6faeb1326` | Write | Send User Data (Controller State) |
-| **TX User** | `08590f7e-db05-467e-8757-72f6faeb1316` | Notify | Receive User Data |
-| **RX Lock** | `08590f7e-db05-467e-8757-72f6faeb13e5` | Write | Unlock/Lock Brain? |
+### Prerequisites
 
-### Packet Structure
+- **Rust**: You need the Rust toolchain installed. [Install Rust](https://rustup.rs/).
+- **Linux**: You need `udev` rules to access the device without root (optional but recommended) and `uinput` permissions.
 
-The protocol uses a custom CDC-like packet structure over BLE.
+### Setup (Linux)
 
-**Command Packet (Host -> Brain):**
-`[Header 4B] [Cmd1 1B] [Cmd2 1B] [Length 1-2B] [Payload N] [CRC 2B]`
+1.  **Install Dependencies**:
+    ```bash
+    sudo apt install libudev-dev
+    ```
 
-- **Header**: `C9 36 B8 47`
-- **Length**:
-  - If `Length < 128`: 1 byte
-  - If `Length >= 128`: 2 bytes (High bit set on first byte)
-- **CRC**: CRC16-XMODEM (Poly `0x1021`) of the entire packet (excluding CRC itself).
+2.  **Clone and Build**:
+    ```bash
+    git clone https://github.com/yourusername/vex-controller.git
+    cd vex-controller
+    cargo build --release
+    ```
 
-**Response Packet (Brain -> Host):**
-`[Header 2B] [Cmd 1B] [Length 1-2B] [Payload N] [CRC 2B]`
+3.  **Setup Permissions**:
+    To run without `sudo`, you need to set up udev rules for the VEX Controller and permissions for `uinput`.
 
-- **Header**: `AA 55`
+    Create a file `/etc/udev/rules.d/99-vex-controller.rules`:
+    ```
+    SUBSYSTEM=="tty", ATTRS{idVendor}=="2888", ATTRS{idProduct}=="0210", MODE="0666"
+    KERNEL=="uinput", MODE="0660", GROUP="input"
+    ```
+    Then reload rules:
+    ```bash
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger
+    ```
+    Add your user to the input group:
+    ```bash
+    sudo usermod -aG input $USER
+    ```
+    (You may need to log out and back in).
 
-### Commands
+## Usage
 
-- `SYS_STATUS` (`0x20`): Request system status.
-- `FILE_INIT` (`0x11`): Initialize file transfer.
-- `FACTORY_PING` (`0xF4`): Ping.
+Connect your VEX IQ Gen 2 Controller to your PC via USB.
 
-### Implementation
+Run the driver in daemon mode to enable the virtual gamepad:
 
-The Rust implementation uses `btleplug` for BLE communication and `tokio` for async execution.
-It connects to the first VEX device found, subscribes to the Admin and User notification channels, and sends a ping.
-It then listens for incoming data and attempts to decode it.
+```bash
+cargo run --release -- --daemon
+```
+
+Or if you installed the binary:
+
+```bash
+./target/release/vex-controller --daemon
+```
+
+The controller should now appear as "VEX IQ Gen 2 Controller" (spoofing an Xbox 360 controller) in your system settings and games.
+
+### Command Line Options
+
+- `--daemon`: Enable virtual gamepad mode.
+- `--port <PORT>`: Manually specify the serial port (e.g., `/dev/ttyACM0`). If not provided, it auto-detects.
+
+## Troubleshooting
+
+- **Permission Denied**: If you get permission errors, try running with `sudo` or check your udev rules.
+- **Controller Not Found**: Ensure the controller is turned on and connected via USB. The Brain is not required, just the controller.
 
