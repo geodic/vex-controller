@@ -1,8 +1,38 @@
-use crate::crc::Crc16;
+use crc::{Crc, CRC_16_XMODEM, CRC_32_ISO_HDLC};
 use byteorder::{BigEndian, ByteOrder};
 
-pub const HEADER: [u8; 4] = [201, 54, 184, 71];
-pub const RESPONSE_HEADER: [u8; 2] = [0xAA, 0x55];
+pub const HEADERS: [u8; 4] = [0xC9, 0x36, 0xB8, 0x47];
+pub const HEADERR: [u8; 2] = [0xAA, 0x55];
+
+pub const CRC16_XMODEM: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
+#[allow(dead_code)]
+pub const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum Command {
+    SysStatus = 0x20,
+    FileInit = 0x11,
+    FactoryPing = 0xF4,
+    // Add more as needed
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum ResponseStatus {
+    AckRx = 0x76,
+    NackRx = 0xFF,
+    // Add more as needed
+}
+
+pub fn calculate_crc16(data: &[u8]) -> u16 {
+    CRC16_XMODEM.checksum(data)
+}
+
+#[allow(dead_code)]
+pub fn calculate_crc32(data: &[u8]) -> u32 {
+    CRC32.checksum(data)
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ControllerState {
@@ -23,20 +53,16 @@ pub struct ControllerState {
     pub battery: u8,
 }
 
-pub struct Protocol {
-    crc: Crc16,
-}
+pub struct Protocol;
 
 impl Protocol {
     pub fn new() -> Self {
-        Self {
-            crc: Crc16::new(),
-        }
+        Self
     }
 
     pub fn encode_command(&self, cmd1: u8, cmd2: u8, data: &[u8]) -> Vec<u8> {
         let mut packet = Vec::new();
-        packet.extend_from_slice(&HEADER);
+        packet.extend_from_slice(&HEADERS);
         packet.push(cmd1);
         packet.push(cmd2);
 
@@ -50,7 +76,7 @@ impl Protocol {
             packet.extend_from_slice(data);
         }
 
-        let crc = self.crc.compute(&packet, 0);
+        let crc = calculate_crc16(&packet);
         packet.push((crc >> 8) as u8);
         packet.push((crc & 0xFF) as u8);
 
@@ -59,18 +85,19 @@ impl Protocol {
 
     pub fn decode_response(&self, buffer: &[u8]) -> Option<Vec<u8>> {
         // Basic validation
-        if buffer.len() < 6 {
+        if buffer.len() < 5 {
             return None;
         }
 
         // Check header
-        if buffer[0..2] != RESPONSE_HEADER {
+        if buffer[0..2] != HEADERR {
             return None;
         }
 
         // Extract data
         // Length parsing (at index 3)
         let (len, header_size) = if (buffer[3] & 0x80) != 0 {
+            if buffer.len() < 5 { return None; }
             let len = ((buffer[3] & 0x7F) as usize) << 8 | (buffer[4] as usize);
             (len, 5)
         } else {
@@ -78,23 +105,23 @@ impl Protocol {
         };
 
         // Check if we have enough data
-        // len includes Cmd + Payload + CRC
-        if buffer.len() < header_size + len {
+        // len includes Payload + CRC
+        let packet_len = header_size + len;
+        if buffer.len() < packet_len {
             return None;
         }
         
-        let packet_len = header_size + len;
         let packet = &buffer[..packet_len];
 
         // Check CRC
         let received_crc = BigEndian::read_u16(&packet[packet_len - 2..]);
-        let calculated_crc = self.crc.compute(&packet[..packet_len - 2], 0);
+        let calculated_crc = calculate_crc16(&packet[..packet_len - 2]);
 
         if received_crc != calculated_crc {
             return None;
         }
 
-        // Return payload (Cmd + Payload), excluding CRC
+        // Return payload, excluding CRC
         Some(packet[header_size..packet_len - 2].to_vec())
     }
 
@@ -112,13 +139,6 @@ impl Protocol {
         // payload[3] is r[7] (Right X?)
         // payload[4] is r[8] (Right Y?)
         
-        // Note: JS mapping might be different from standard VEX IQ
-        // Assuming:
-        // 5: Left X
-        // 6: Left Y
-        // 7: Right X
-        // 8: Right Y
-        
         let left_x = payload[1];
         let left_y = payload[2];
         let right_x = payload[3];
@@ -129,16 +149,6 @@ impl Protocol {
         let buttons = BigEndian::read_u16(&payload[8..10]);
         let extra_buttons = payload[10];
         
-        // JS Mapping:
-        // e[4]=o>>5&1  (L1)
-        // e[5]=o>>4&1  (L2)
-        // e[6]=o>>7&1  (R1)
-        // e[7]=o>>6&1  (R2)
-        // e[8]=o>>3&1  (Up)
-        // e[9]=o>>1&1  (Down)
-        // e[10]=o>>2&1 (Left)
-        // e[11]=o>>0&1 (Right)
-
         Some(ControllerState {
             left_x,
             left_y,
@@ -154,7 +164,7 @@ impl Protocol {
             f_down: (buttons >> 0) & 1 != 0,
             l3: (extra_buttons & 0x01) != 0,
             r3: (extra_buttons & 0x02) != 0,
-            battery: payload[11], // Guessing battery at offset 15 (payload[11]) based on 0x64 (100) seen in logs
+            battery: payload[11], 
         })
     }
 }

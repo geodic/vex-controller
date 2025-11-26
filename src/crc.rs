@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub struct Crc16 {
     table: [u16; 256],
 }

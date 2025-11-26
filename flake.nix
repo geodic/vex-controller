@@ -19,6 +19,7 @@
             openssl
             pkg-config
             udev
+            dbus
           ];
 
           languages.rust = {
